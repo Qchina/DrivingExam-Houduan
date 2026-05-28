@@ -38,7 +38,7 @@ public class QuestionController {
 
     @GetMapping("/random")
     public ApiResponse<List<Question>> random(
-        @RequestParam int subject,
+        @RequestParam(defaultValue = "1") int subject,
         @RequestParam(defaultValue = "20") int limit
     ) {
         return ApiResponse.success(service.randomQuestions(subject, limit));

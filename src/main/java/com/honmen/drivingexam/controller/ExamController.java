@@ -26,7 +26,7 @@ public class ExamController {
     }
 
     @GetMapping("/paper")
-    public ApiResponse<List<Question>> paper(@RequestParam int subject) {
+    public ApiResponse<List<Question>> paper(@RequestParam(defaultValue = "1") int subject) {
         return ApiResponse.success(service.examPaper(subject));
     }
 
