@@ -1,0 +1,10 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: driving-exam-houduan
+
+logging:
+  level:
+    com.honmen.drivingexam: info
