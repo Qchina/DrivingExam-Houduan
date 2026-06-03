@@ -8,11 +8,14 @@ import com.honmen.drivingexam.dto.AuthDtos.AuthResponse;
 import com.honmen.drivingexam.dto.BusinessDtos.ErrorQuestion;
 import com.honmen.drivingexam.dto.BusinessDtos.ExamSubmitRequest;
 import com.honmen.drivingexam.dto.BusinessDtos.FavoriteQuestion;
+import com.honmen.drivingexam.dto.BusinessDtos.PracticeQuestionStatus;
+import com.honmen.drivingexam.dto.BusinessDtos.ProgressRequest;
 import com.honmen.drivingexam.dto.BusinessDtos.StatsOverview;
 import com.honmen.drivingexam.dto.PageResult;
 import com.honmen.drivingexam.exception.ApiException;
 import com.honmen.drivingexam.model.ExamHistory;
 import com.honmen.drivingexam.model.PracticeProgress;
+import com.honmen.drivingexam.model.PracticeRecord;
 import com.honmen.drivingexam.model.Question;
 import com.honmen.drivingexam.model.User;
 import org.springframework.dao.DuplicateKeyException;
@@ -21,6 +24,7 @@ import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -31,11 +35,15 @@ import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.stream.Collectors;
 
 import static com.honmen.drivingexam.dto.BusinessDtos.SubjectOverview;
 
@@ -293,8 +301,18 @@ public class DrivingExamService {
             """, this::mapExamHistory, userId, subject);
     }
 
-    public PracticeProgress syncProgress(long userId, int subject, long lastQuestionId, int answeredDelta, int correctDelta, int wrongDelta) {
+    @Transactional
+    public PracticeProgress syncProgress(long userId, ProgressRequest request) {
+        int subject = request.subject();
+        long lastQuestionId = request.lastQuestionId();
+        int answeredDelta = request.answeredDelta();
+        int correctDelta = request.correctDelta();
+        int wrongDelta = request.wrongDelta();
+
         validateSubject(subject);
+        Optional<PracticeRecordUpsert> practiceRecordUpdate = resolvePracticeRecordUpdate(request);
+        practiceRecordUpdate.ifPresent(update -> validateQuestionSubject(update.questionId(), subject));
+
         jdbc.update("""
             INSERT INTO user_practice_progress
                 (user_id, subject, last_question_id, total_answered, total_correct, total_wrong)
@@ -312,11 +330,46 @@ public class DrivingExamService {
             Math.max(correctDelta, 0),
             Math.max(wrongDelta, 0)
         );
-        return getPracticeProgress(userId, subject);
+
+        practiceRecordUpdate.ifPresent(update ->
+            upsertPracticeRecord(userId, update.questionId(), subject, request.latestAnswer(), update.latestResult())
+        );
+        return buildPracticeProgress(userId, subject);
     }
 
     public StatsOverview statsOverview(long userId) {
         return new StatsOverview(subjectOverview(userId, 1), subjectOverview(userId, 4));
+    }
+
+    public List<PracticeQuestionStatus> listPracticeStatuses(long userId, int subject, String questionIds) {
+        validateSubject(subject);
+        List<Long> parsedQuestionIds = parseQuestionIds(questionIds);
+        if (parsedQuestionIds.isEmpty()) {
+            return jdbc.query("""
+                SELECT question_id, latest_result
+                FROM user_practice_record
+                WHERE user_id = ? AND subject = ?
+                ORDER BY question_id
+                """, (rs, rowNum) -> new PracticeQuestionStatus(
+                rs.getLong("question_id"),
+                true,
+                rs.getInt("latest_result") == 1
+            ), userId, subject);
+        }
+
+        Map<Long, PracticeRecord> recordByQuestionId = listPracticeRecords(userId, subject, parsedQuestionIds).stream()
+            .collect(Collectors.toMap(PracticeRecord::getQuestionId, record -> record));
+
+        List<PracticeQuestionStatus> statuses = new ArrayList<>(parsedQuestionIds.size());
+        for (Long questionId : parsedQuestionIds) {
+            PracticeRecord record = recordByQuestionId.get(questionId);
+            statuses.add(new PracticeQuestionStatus(
+                questionId,
+                record != null,
+                record != null && record.getLatestResult() == 1
+            ));
+        }
+        return statuses;
     }
 
     private AuthResponse issueToken(User user) {
@@ -359,7 +412,7 @@ public class DrivingExamService {
     }
 
     private SubjectOverview subjectOverview(long userId, int subject) {
-        PracticeProgress progress = getPracticeProgress(userId, subject);
+        PracticeProgress progress = buildPracticeProgress(userId, subject);
         String accuracy = progress.getTotalAnswered() == 0
             ? "0.0%"
             : String.format("%.1f%%", progress.getTotalCorrect() * 100.0 / progress.getTotalAnswered());
@@ -372,7 +425,24 @@ public class DrivingExamService {
         );
     }
 
-    private PracticeProgress getPracticeProgress(long userId, int subject) {
+    private PracticeProgress buildPracticeProgress(long userId, int subject) {
+        PracticeProgress storedProgress = getStoredPracticeProgress(userId, subject);
+        PracticeRecordStats recordStats = getPracticeRecordStats(userId, subject);
+        if (recordStats.totalAnswered() == 0) {
+            return storedProgress;
+        }
+
+        PracticeProgress progress = new PracticeProgress(userId, subject);
+        progress.sync(
+            resolveResumeQuestionId(userId, subject, storedProgress.getLastQuestionId()),
+            recordStats.totalAnswered(),
+            recordStats.totalCorrect(),
+            recordStats.totalWrong()
+        );
+        return progress;
+    }
+
+    private PracticeProgress getStoredPracticeProgress(long userId, int subject) {
         return queryOne(
             "SELECT * FROM user_practice_progress WHERE user_id = ? AND subject = ?",
             (rs, rowNum) -> {
@@ -388,6 +458,127 @@ public class DrivingExamService {
             userId,
             subject
         ).orElseGet(() -> new PracticeProgress(userId, subject));
+    }
+
+    private Optional<PracticeRecord> findPracticeRecord(long userId, long questionId) {
+        return queryOne("""
+            SELECT * FROM user_practice_record
+            WHERE user_id = ? AND question_id = ?
+            """, this::mapPracticeRecord, userId, questionId);
+    }
+
+    private List<PracticeRecord> listPracticeRecords(long userId, int subject, List<Long> questionIds) {
+        if (questionIds.isEmpty()) {
+            return List.of();
+        }
+
+        String placeholders = String.join(", ", Collections.nCopies(questionIds.size(), "?"));
+        List<Object> args = new ArrayList<>(questionIds.size() + 2);
+        args.add(userId);
+        args.add(subject);
+        args.addAll(questionIds);
+
+        return jdbc.query("""
+            SELECT * FROM user_practice_record
+            WHERE user_id = ? AND subject = ? AND question_id IN (%s)
+            """.formatted(placeholders), this::mapPracticeRecord, args.toArray());
+    }
+
+    private PracticeRecordStats getPracticeRecordStats(long userId, int subject) {
+        return queryOne("""
+            SELECT
+                COUNT(*) AS total_answered,
+                COALESCE(SUM(CASE WHEN latest_result = 1 THEN 1 ELSE 0 END), 0) AS total_correct,
+                COALESCE(SUM(CASE WHEN latest_result = 0 THEN 1 ELSE 0 END), 0) AS total_wrong
+            FROM user_practice_record
+            WHERE user_id = ? AND subject = ?
+            """, (rs, rowNum) -> new PracticeRecordStats(
+            rs.getInt("total_answered"),
+            rs.getInt("total_correct"),
+            rs.getInt("total_wrong")
+        ), userId, subject).orElseGet(() -> new PracticeRecordStats(0, 0, 0));
+    }
+
+    private long resolveResumeQuestionId(long userId, int subject, long fallbackQuestionId) {
+        Optional<Long> firstUnanswered = queryOne("""
+            SELECT q.id
+            FROM question q
+            LEFT JOIN user_practice_record r
+                ON r.question_id = q.id AND r.user_id = ?
+            WHERE q.subject = ? AND r.id IS NULL
+            ORDER BY q.id
+            LIMIT 1
+            """, (rs, rowNum) -> rs.getLong("id"), userId, subject);
+        if (firstUnanswered.isPresent()) {
+            return firstUnanswered.get();
+        }
+
+        return queryOne("""
+            SELECT question_id
+            FROM user_practice_record
+            WHERE user_id = ? AND subject = ?
+            ORDER BY answered_at DESC, updated_at DESC, question_id DESC
+            LIMIT 1
+            """, (rs, rowNum) -> rs.getLong("question_id"), userId, subject)
+            .orElse(fallbackQuestionId);
+    }
+
+    private Optional<PracticeRecordUpsert> resolvePracticeRecordUpdate(ProgressRequest request) {
+        Integer latestResult = normalizeLatestResult(request.latestResult(), request.answeredDelta(), request.correctDelta(), request.wrongDelta());
+        if (latestResult == null) {
+            return Optional.empty();
+        }
+
+        long questionId = Optional.ofNullable(request.questionId()).orElse(request.lastQuestionId());
+        if (questionId <= 0) {
+            return Optional.empty();
+        }
+        return Optional.of(new PracticeRecordUpsert(questionId, latestResult));
+    }
+
+    private Integer normalizeLatestResult(Integer latestResult, int answeredDelta, int correctDelta, int wrongDelta) {
+        if (latestResult != null) {
+            if (latestResult != 0 && latestResult != 1) {
+                throw new ApiException(400, "latestResult must be 0 or 1");
+            }
+            return latestResult;
+        }
+        if (answeredDelta <= 0) {
+            return null;
+        }
+        if (correctDelta > 0 && wrongDelta == 0) {
+            return 1;
+        }
+        if (wrongDelta > 0 && correctDelta == 0) {
+            return 0;
+        }
+        return null;
+    }
+
+    private void upsertPracticeRecord(long userId, long questionId, int subject, String latestAnswer, int latestResult) {
+        jdbc.update("""
+            INSERT INTO user_practice_record
+                (user_id, question_id, subject, latest_answer, latest_result, answered_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON DUPLICATE KEY UPDATE
+                subject = VALUES(subject),
+                latest_answer = COALESCE(VALUES(latest_answer), latest_answer),
+                latest_result = VALUES(latest_result),
+                answered_at = VALUES(answered_at)
+            """, userId, questionId, subject, latestAnswer, latestResult);
+    }
+
+    private PracticeRecord mapPracticeRecord(java.sql.ResultSet rs, int rowNum) throws java.sql.SQLException {
+        return new PracticeRecord(
+            rs.getLong("id"),
+            rs.getLong("user_id"),
+            rs.getLong("question_id"),
+            rs.getInt("subject"),
+            rs.getString("latest_answer"),
+            rs.getInt("latest_result"),
+            toLocalDateTime(rs.getTimestamp("answered_at")),
+            toLocalDateTime(rs.getTimestamp("updated_at"))
+        );
     }
 
     private ErrorQuestion getErrorQuestion(long userId, long questionId) {
@@ -451,6 +642,30 @@ public class DrivingExamService {
 
     private boolean questionExists(long id) {
         return Optional.ofNullable(jdbc.queryForObject("SELECT COUNT(*) FROM question WHERE id = ?", Long.class, id)).orElse(0L) > 0;
+    }
+
+    private List<Long> parseQuestionIds(String questionIds) {
+        if (questionIds == null || questionIds.isBlank()) {
+            return List.of();
+        }
+
+        LinkedHashSet<Long> parsed = new LinkedHashSet<>();
+        for (String item : questionIds.split(",")) {
+            String trimmed = item.trim();
+            if (trimmed.isEmpty()) {
+                continue;
+            }
+            try {
+                long questionId = Long.parseLong(trimmed);
+                if (questionId <= 0) {
+                    throw new ApiException(400, "questionIds must contain positive integers");
+                }
+                parsed.add(questionId);
+            } catch (NumberFormatException ex) {
+                throw new ApiException(400, "questionIds must be a comma-separated list of integers");
+            }
+        }
+        return List.copyOf(parsed);
     }
 
     private int normalizeLimit(int limit) {
@@ -552,5 +767,11 @@ public class DrivingExamService {
     private <T> Optional<T> queryOne(String sql, RowMapper<T> mapper, Object... args) {
         List<T> list = jdbc.query(sql, mapper, args);
         return list.stream().findFirst();
+    }
+
+    private record PracticeRecordStats(int totalAnswered, int totalCorrect, int totalWrong) {
+    }
+
+    private record PracticeRecordUpsert(long questionId, int latestResult) {
     }
 }

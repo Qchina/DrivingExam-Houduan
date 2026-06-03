@@ -3,6 +3,7 @@ package com.honmen.drivingexam.dto;
 import com.honmen.drivingexam.model.Question;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -31,7 +32,10 @@ public final class BusinessDtos {
         @NotNull Long lastQuestionId,
         @NotNull @Min(0) Integer answeredDelta,
         @NotNull @Min(0) Integer correctDelta,
-        @NotNull @Min(0) Integer wrongDelta
+        @NotNull @Min(0) Integer wrongDelta,
+        Long questionId,
+        @Size(max = 10) String latestAnswer,
+        Integer latestResult
     ) {
     }
 
@@ -45,6 +49,9 @@ public final class BusinessDtos {
     }
 
     public record FavoriteQuestion(Question question, LocalDateTime createdAt) {
+    }
+
+    public record PracticeQuestionStatus(long questionId, boolean answered, boolean correct) {
     }
 
     public record SubjectOverview(int totalAnswered, int totalCorrect, int totalWrong, String accuracy, long lastQuestionId) {
