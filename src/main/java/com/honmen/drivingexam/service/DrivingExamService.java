@@ -372,6 +372,26 @@ public class DrivingExamService {
         return statuses;
     }
 
+    @Transactional
+    public void resetProgress(long userId, int subject) {
+        validateSubject(subject);
+        jdbc.update(
+            "DELETE FROM user_practice_record WHERE user_id = ? AND subject = ?",
+            userId,
+            subject
+        );
+        jdbc.update("""
+            INSERT INTO user_practice_progress
+                (user_id, subject, last_question_id, total_answered, total_correct, total_wrong)
+            VALUES (?, ?, 0, 0, 0, 0)
+            ON DUPLICATE KEY UPDATE
+                last_question_id = 0,
+                total_answered = 0,
+                total_correct = 0,
+                total_wrong = 0
+            """, userId, subject);
+    }
+
     private AuthResponse issueToken(User user) {
         String token = UUID.randomUUID().toString().replace("-", "");
         tokenToUserId.put(token, user.id());
@@ -439,9 +459,14 @@ public class DrivingExamService {
             return storedProgress;
         }
 
+        long lastQuestionId = storedProgress.getLastQuestionId();
+        if (lastQuestionId <= 0) {
+            lastQuestionId = resolveResumeQuestionId(userId, subject, storedProgress.getLastQuestionId());
+        }
+
         PracticeProgress progress = new PracticeProgress(userId, subject);
         progress.sync(
-            resolveResumeQuestionId(userId, subject, storedProgress.getLastQuestionId()),
+            lastQuestionId,
             recordStats.totalAnswered(),
             recordStats.totalCorrect(),
             recordStats.totalWrong()

@@ -6,6 +6,7 @@ import com.honmen.drivingexam.dto.BusinessDtos.ProgressRequest;
 import com.honmen.drivingexam.model.PracticeProgress;
 import com.honmen.drivingexam.service.DrivingExamService;
 import jakarta.validation.Valid;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -42,5 +43,15 @@ public class ProgressController {
     ) {
         long userId = service.requireUserId(authorization);
         return ApiResponse.success(service.listPracticeStatuses(userId, subject, questionIds));
+    }
+
+    @DeleteMapping
+    public ApiResponse<Void> reset(
+        @RequestHeader(value = "Authorization", required = false) String authorization,
+        @RequestParam int subject
+    ) {
+        long userId = service.requireUserId(authorization);
+        service.resetProgress(userId, subject);
+        return ApiResponse.success(null);
     }
 }
