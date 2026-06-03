@@ -75,7 +75,7 @@ public class DrivingExamService {
     }
 
     public AuthResponse register(String username, String password) {
-        String nickname = "Mock User";
+        String nickname = "驾考新星";
         try {
             KeyHolder keyHolder = new GeneratedKeyHolder();
             jdbc.update(connection -> {
@@ -99,7 +99,7 @@ public class DrivingExamService {
     public AuthResponse login(String username, String password) {
         Optional<User> matched = findUserByUsername(username)
             .filter(user -> user.password().equals(password));
-        return issueToken(matched.orElseGet(this::getDefaultUser));
+        return issueToken(matched.orElseThrow(() -> new ApiException(401, "账号或密码错误")));
     }
 
     public long requireUserId(String authorization) {
@@ -381,7 +381,14 @@ public class DrivingExamService {
     private void ensureDefaultUser() {
         if (findUserByUsername("13800000000").isEmpty()) {
             register("13800000000", "123456");
+            return;
         }
+        jdbc.update(
+            "UPDATE `user` SET nickname = ? WHERE username = ? AND nickname = ?",
+            "驾考新星",
+            "13800000000",
+            "Mock User"
+        );
     }
 
     private User getDefaultUser() {
