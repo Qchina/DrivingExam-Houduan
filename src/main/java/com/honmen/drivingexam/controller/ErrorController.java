@@ -2,6 +2,7 @@ package com.honmen.drivingexam.controller;
 
 import com.honmen.drivingexam.dto.ApiResponse;
 import com.honmen.drivingexam.dto.BusinessDtos.ErrorQuestion;
+import com.honmen.drivingexam.dto.BusinessDtos.ErrorReviewRequest;
 import com.honmen.drivingexam.dto.BusinessDtos.ErrorRequest;
 import com.honmen.drivingexam.dto.PageResult;
 import com.honmen.drivingexam.service.DrivingExamService;
@@ -30,11 +31,12 @@ public class ErrorController {
         @RequestHeader(value = "Authorization", required = false) String authorization,
         @RequestParam int subject,
         @RequestParam(required = false) Integer isMastered,
+        @RequestParam(defaultValue = "all") String scope,
         @RequestParam(defaultValue = "1") int page,
         @RequestParam(defaultValue = "20") int limit
     ) {
         long userId = service.requireUserId(authorization);
-        return ApiResponse.success(service.listErrors(userId, subject, isMastered, page, limit));
+        return ApiResponse.success(service.listErrors(userId, subject, isMastered, scope, page, limit));
     }
 
     @PostMapping
@@ -53,5 +55,22 @@ public class ErrorController {
     ) {
         long userId = service.requireUserId(authorization);
         return ApiResponse.success(service.markErrorMastered(userId, questionId));
+    }
+
+    @PostMapping("/review-result")
+    public ApiResponse<ErrorQuestion> reviewResult(
+        @RequestHeader(value = "Authorization", required = false) String authorization,
+        @Valid @RequestBody ErrorReviewRequest request
+    ) {
+        long userId = service.requireUserId(authorization);
+        return ApiResponse.success(
+            service.reviewErrorQuestion(
+                userId,
+                request.questionId(),
+                request.subject(),
+                request.isCorrect(),
+                request.removeThreshold()
+            )
+        );
     }
 }

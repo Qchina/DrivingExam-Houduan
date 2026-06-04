@@ -27,6 +27,16 @@ public final class BusinessDtos {
     ) {
     }
 
+    public record MockExamProgressRequest(
+        @NotNull Integer subject,
+        @NotNull @Size(min = 1, max = 100) List<Long> questionIds,
+        @NotNull List<String> selectedAnswers,
+        @NotNull List<Boolean> revealedAnswers,
+        @NotNull @Min(0) Integer currentIndex,
+        @NotNull @Min(0) Integer remainingSeconds
+    ) {
+    }
+
     public record ProgressRequest(
         @NotNull Integer subject,
         @NotNull Long lastQuestionId,
@@ -39,11 +49,21 @@ public final class BusinessDtos {
     ) {
     }
 
+    public record ErrorReviewRequest(
+        @NotNull Long questionId,
+        @NotNull Integer subject,
+        @NotNull Boolean isCorrect,
+        @NotNull @Min(0) Integer removeThreshold
+    ) {
+    }
+
     public record ErrorQuestion(
         Question question,
         int errorCount,
         String latestWrongAnswer,
+        int correctStreak,
         int isMastered,
+        LocalDateTime lastWrongAt,
         LocalDateTime updatedAt
     ) {
     }

@@ -8,12 +8,18 @@ import com.honmen.drivingexam.dto.AuthDtos.AuthResponse;
 import com.honmen.drivingexam.dto.BusinessDtos.ErrorQuestion;
 import com.honmen.drivingexam.dto.BusinessDtos.ExamSubmitRequest;
 import com.honmen.drivingexam.dto.BusinessDtos.FavoriteQuestion;
+import com.honmen.drivingexam.dto.BusinessDtos.MockExamProgressRequest;
 import com.honmen.drivingexam.dto.BusinessDtos.PracticeQuestionStatus;
 import com.honmen.drivingexam.dto.BusinessDtos.ProgressRequest;
 import com.honmen.drivingexam.dto.BusinessDtos.StatsOverview;
 import com.honmen.drivingexam.dto.PageResult;
 import com.honmen.drivingexam.exception.ApiException;
 import com.honmen.drivingexam.model.*;
+import com.honmen.drivingexam.model.ExamHistory;
+import com.honmen.drivingexam.model.MockExamProgress;
+import com.honmen.drivingexam.model.PracticeProgress;
+import com.honmen.drivingexam.model.Question;
+import com.honmen.drivingexam.model.User;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -159,61 +165,124 @@ public class DrivingExamService {
         return list;
     }
 
-    public PageResult<ErrorQuestion> listErrors(long userId, int subject, Integer isMastered, int page, int limit) {
+    public PageResult<ErrorQuestion> listErrors(long userId, int subject, Integer isMastered, String scope, int page, int limit) {
         validateSubject(subject);
         int safePage = Math.max(page, 1);
         int safeLimit = normalizeLimit(limit);
         int offset = (safePage - 1) * safeLimit;
 
-        String countSql = "SELECT COUNT(*) FROM user_error_book WHERE user_id = ? AND subject = ?";
-        String listSql = """
-            SELECT q.*, e.error_count, e.latest_wrong_answer, e.is_mastered, e.updated_at
-            FROM user_error_book e
-            JOIN question q ON q.id = e.question_id
-            WHERE e.user_id = ? AND e.subject = ?
-            ORDER BY e.updated_at DESC
-            LIMIT ? OFFSET ?
-            """;
-        Object[] countArgs = {userId, subject};
-        Object[] listArgs = {userId, subject, safeLimit, offset};
+        String normalizedScope = normalizeErrorScope(scope);
+        StringBuilder whereClause = new StringBuilder(" WHERE e.user_id = ? AND e.subject = ?");
+        List<Object> args = new ArrayList<>();
+        args.add(userId);
+        args.add(subject);
 
         if (isMastered != null) {
-            countSql += " AND is_mastered = ?";
-            listSql = """
-                SELECT q.*, e.error_count, e.latest_wrong_answer, e.is_mastered, e.updated_at
-                FROM user_error_book e
-                JOIN question q ON q.id = e.question_id
-                WHERE e.user_id = ? AND e.subject = ? AND e.is_mastered = ?
-                ORDER BY e.updated_at DESC
-                LIMIT ? OFFSET ?
-                """;
-            countArgs = new Object[] {userId, subject, isMastered};
-            listArgs = new Object[] {userId, subject, isMastered, safeLimit, offset};
+            whereClause.append(" AND e.is_mastered = ?");
+            args.add(isMastered);
+        }
+        if ("today".equals(normalizedScope)) {
+            whereClause.append(" AND e.last_wrong_at >= CURDATE() AND e.last_wrong_at < DATE_ADD(CURDATE(), INTERVAL 1 DAY)");
+        } else if ("repeated".equals(normalizedScope)) {
+            whereClause.append(" AND e.error_count >= 3");
         }
 
-        long total = Optional.ofNullable(jdbc.queryForObject(countSql, Long.class, countArgs)).orElse(0L);
-        List<ErrorQuestion> list = jdbc.query(listSql, this::mapErrorQuestion, listArgs);
+        String countSql = "SELECT COUNT(*) FROM user_error_book e" + whereClause;
+        String listSql = """
+            SELECT q.*, e.error_count, e.latest_wrong_answer, e.correct_streak, e.is_mastered, e.last_wrong_at, e.updated_at
+            FROM user_error_book e
+            JOIN question q ON q.id = e.question_id
+            """ + whereClause + """
+            
+            ORDER BY e.last_wrong_at DESC, e.updated_at DESC
+            LIMIT ? OFFSET ?
+            """;
+
+        List<Object> listArgs = new ArrayList<>(args);
+        listArgs.add(safeLimit);
+        listArgs.add(offset);
+
+        long total = Optional.ofNullable(jdbc.queryForObject(countSql, Long.class, args.toArray())).orElse(0L);
+        List<ErrorQuestion> list = jdbc.query(listSql, this::mapErrorQuestion, listArgs.toArray());
         return new PageResult<>(total, safePage, safeLimit, list);
     }
 
     public ErrorQuestion recordError(long userId, long questionId, int subject, String wrongAnswer) {
         validateQuestionSubject(questionId, subject);
         jdbc.update("""
-            INSERT INTO user_error_book (user_id, question_id, subject, latest_wrong_answer, error_count, is_mastered)
-            VALUES (?, ?, ?, ?, 1, 0)
+            INSERT INTO user_error_book
+                (user_id, question_id, subject, latest_wrong_answer, error_count, correct_streak, is_mastered, last_wrong_at)
+            VALUES (?, ?, ?, ?, 1, 0, 0, CURRENT_TIMESTAMP)
             ON DUPLICATE KEY UPDATE
                 latest_wrong_answer = VALUES(latest_wrong_answer),
                 error_count = error_count + 1,
-                is_mastered = 0
+                correct_streak = 0,
+                is_mastered = 0,
+                last_wrong_at = CURRENT_TIMESTAMP
             """, userId, questionId, subject, wrongAnswer);
         return getErrorQuestion(userId, questionId);
     }
 
     public ErrorQuestion markErrorMastered(long userId, long questionId) {
         int updated = jdbc.update(
-            "UPDATE user_error_book SET is_mastered = 1 WHERE user_id = ? AND question_id = ?",
+            """
+                UPDATE user_error_book
+                SET
+                    error_count = 0,
+                    correct_streak = 0,
+                    latest_wrong_answer = NULL,
+                    is_mastered = 1,
+                    last_wrong_at = NULL
+                WHERE user_id = ? AND question_id = ?
+                """,
             userId,
             questionId
+        );
+        if (updated == 0) {
+            throw new ApiException(400, "Error question not found");
+        }
+        return getErrorQuestion(userId, questionId);
+    }
+
+    public ErrorQuestion reviewErrorQuestion(long userId, long questionId, int subject, boolean isCorrect, int removeThreshold) {
+        validateQuestionSubject(questionId, subject);
+        validateRemoveThreshold(removeThreshold);
+
+        if (!isCorrect) {
+            return recordError(userId, questionId, subject, "");
+        }
+
+        int updated = jdbc.update("""
+            UPDATE user_error_book
+            SET
+                error_count = CASE
+                    WHEN ? > 0 AND correct_streak + 1 >= ? THEN 0
+                    ELSE error_count
+                END,
+                correct_streak = CASE
+                    WHEN ? > 0 AND correct_streak + 1 >= ? THEN 0
+                    ELSE correct_streak + 1
+                END,
+                latest_wrong_answer = CASE
+                    WHEN ? > 0 AND correct_streak + 1 >= ? THEN NULL
+                    ELSE latest_wrong_answer
+                END,
+                is_mastered = CASE
+                    WHEN ? > 0 AND correct_streak + 1 >= ? THEN 1
+                    ELSE 0
+                END,
+                last_wrong_at = CASE
+                    WHEN ? > 0 AND correct_streak + 1 >= ? THEN NULL
+                    ELSE last_wrong_at
+                END
+            WHERE user_id = ? AND question_id = ? AND subject = ?
+            """,
+            removeThreshold, removeThreshold,
+            removeThreshold, removeThreshold,
+            removeThreshold, removeThreshold,
+            removeThreshold, removeThreshold,
+            removeThreshold, removeThreshold,
+            userId, questionId, subject
         );
         if (updated == 0) {
             throw new ApiException(400, "Error question not found");
@@ -262,6 +331,53 @@ public class DrivingExamService {
         return randomQuestions(subject, limit);
     }
 
+    public Optional<MockExamProgress> findMockExamProgress(long userId, int subject) {
+        validateSubject(subject);
+        return queryOne(
+            "SELECT * FROM user_mock_exam_progress WHERE user_id = ? AND subject = ?",
+            this::mapMockExamProgress,
+            userId,
+            subject
+        );
+    }
+
+    public MockExamProgress saveMockExamProgress(long userId, MockExamProgressRequest request) {
+        validateSubject(request.subject());
+
+        List<Long> questionIds = normalizeQuestionIds(request.questionIds(), request.subject());
+        List<String> selectedAnswers = normalizeSelectedAnswers(request.selectedAnswers(), questionIds.size());
+        List<Boolean> revealedAnswers = normalizeRevealedAnswers(request.revealedAnswers(), questionIds.size());
+        int currentIndex = normalizeCurrentIndex(request.currentIndex(), questionIds.size());
+
+        jdbc.update("""
+            INSERT INTO user_mock_exam_progress
+                (user_id, subject, question_ids, selected_answers, revealed_answers, current_index, remaining_seconds)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+                question_ids = VALUES(question_ids),
+                selected_answers = VALUES(selected_answers),
+                revealed_answers = VALUES(revealed_answers),
+                current_index = VALUES(current_index),
+                remaining_seconds = VALUES(remaining_seconds)
+            """,
+            userId,
+            request.subject(),
+            toJsonValue(questionIds),
+            toJsonValue(selectedAnswers),
+            toJsonValue(revealedAnswers),
+            currentIndex,
+            request.remainingSeconds()
+        );
+
+        return findMockExamProgress(userId, request.subject())
+            .orElseThrow(() -> new ApiException(500, "Failed to save mock exam progress"));
+    }
+
+    public void deleteMockExamProgress(long userId, int subject) {
+        validateSubject(subject);
+        jdbc.update("DELETE FROM user_mock_exam_progress WHERE user_id = ? AND subject = ?", userId, subject);
+    }
+
     public ExamHistory submitExam(long userId, ExamSubmitRequest request) {
         validateSubject(request.subject());
         List<Long> wrongIds = request.wrongQuestionIds() == null ? List.of() : List.copyOf(request.wrongQuestionIds());
@@ -284,6 +400,7 @@ public class DrivingExamService {
             statement.setString(6, wrongIdsJson);
             return statement;
         }, keyHolder);
+        deleteMockExamProgress(userId, request.subject());
         long id = Optional.ofNullable(keyHolder.getKey()).map(Number::longValue).orElse(0L);
         return getExamHistory(id);
     }
@@ -354,7 +471,7 @@ public class DrivingExamService {
         }
 
         Map<Long, PracticeRecord> recordByQuestionId = listPracticeRecords(userId, subject, parsedQuestionIds).stream()
-            .collect(Collectors.toMap(PracticeRecord::getQuestionId, record -> record));
+            .collect(Collectors.toMap(PracticeRecord::questionId, record -> record));
 
         List<PracticeQuestionStatus> statuses = new ArrayList<>(parsedQuestionIds.size());
         for (Long questionId : parsedQuestionIds) {
@@ -362,7 +479,7 @@ public class DrivingExamService {
             statuses.add(new PracticeQuestionStatus(
                 questionId,
                 record != null,
-                record != null && record.getLatestResult() == 1
+                record != null && record.latestResult() == 1
             ));
         }
         return statuses;
@@ -611,7 +728,7 @@ public class DrivingExamService {
 
     private ErrorQuestion getErrorQuestion(long userId, long questionId) {
         return queryOne("""
-            SELECT q.*, e.error_count, e.latest_wrong_answer, e.is_mastered, e.updated_at
+            SELECT q.*, e.error_count, e.latest_wrong_answer, e.correct_streak, e.is_mastered, e.last_wrong_at, e.updated_at
             FROM user_error_book e
             JOIN question q ON q.id = e.question_id
             WHERE e.user_id = ? AND e.question_id = ?
@@ -624,7 +741,9 @@ public class DrivingExamService {
             questionMapper.mapRow(rs, rowNum),
             rs.getInt("error_count"),
             rs.getString("latest_wrong_answer"),
+            rs.getInt("correct_streak"),
             rs.getInt("is_mastered"),
+            toLocalDateTime(rs.getTimestamp("last_wrong_at")),
             toLocalDateTime(rs.getTimestamp("updated_at"))
         );
     }
@@ -664,6 +783,20 @@ public class DrivingExamService {
         );
     }
 
+    private MockExamProgress mapMockExamProgress(java.sql.ResultSet rs, int rowNum) throws java.sql.SQLException {
+        return new MockExamProgress(
+            rs.getLong("id"),
+            rs.getLong("user_id"),
+            rs.getInt("subject"),
+            parseLongList(rs.getString("question_ids")),
+            parseStringList(rs.getString("selected_answers")),
+            parseBooleanList(rs.getString("revealed_answers")),
+            rs.getInt("current_index"),
+            rs.getInt("remaining_seconds"),
+            toLocalDateTime(rs.getTimestamp("updated_at"))
+        );
+    }
+
     private Optional<Question> findQuestion(long id) {
         return queryOne("SELECT * FROM question WHERE id = ?", questionMapper, id);
     }
@@ -696,8 +829,78 @@ public class DrivingExamService {
         return List.copyOf(parsed);
     }
 
+    private List<Long> normalizeQuestionIds(List<Long> questionIds, int subject) {
+        if (questionIds == null || questionIds.isEmpty()) {
+            throw new ApiException(400, "questionIds must not be empty");
+        }
+
+        int expectedSize = subject == 1 ? 100 : 50;
+        if (questionIds.size() != expectedSize) {
+            throw new ApiException(400, "questionIds size does not match subject exam size");
+        }
+
+        LinkedHashSet<Long> uniqueIds = new LinkedHashSet<>();
+        for (Long questionId : questionIds) {
+            if (questionId == null || questionId <= 0) {
+                throw new ApiException(400, "questionIds must contain positive integers");
+            }
+            validateQuestionSubject(questionId, subject);
+            uniqueIds.add(questionId);
+        }
+
+        if (uniqueIds.size() != questionIds.size()) {
+            throw new ApiException(400, "questionIds must not contain duplicates");
+        }
+        return List.copyOf(questionIds);
+    }
+
+    private List<String> normalizeSelectedAnswers(List<String> selectedAnswers, int questionCount) {
+        if (selectedAnswers == null || selectedAnswers.size() != questionCount) {
+            throw new ApiException(400, "selectedAnswers size mismatch");
+        }
+
+        List<String> normalizedAnswers = new ArrayList<>(questionCount);
+        for (String answer : selectedAnswers) {
+            normalizedAnswers.add(answer == null ? "" : answer);
+        }
+        return List.copyOf(normalizedAnswers);
+    }
+
+    private List<Boolean> normalizeRevealedAnswers(List<Boolean> revealedAnswers, int questionCount) {
+        if (revealedAnswers == null || revealedAnswers.size() != questionCount) {
+            throw new ApiException(400, "revealedAnswers size mismatch");
+        }
+
+        List<Boolean> normalizedRevealed = new ArrayList<>(questionCount);
+        for (Boolean revealed : revealedAnswers) {
+            normalizedRevealed.add(Boolean.TRUE.equals(revealed));
+        }
+        return List.copyOf(normalizedRevealed);
+    }
+
+    private int normalizeCurrentIndex(int currentIndex, int questionCount) {
+        if (currentIndex < 0 || currentIndex >= questionCount) {
+            throw new ApiException(400, "currentIndex is out of range");
+        }
+        return currentIndex;
+    }
+
     private int normalizeLimit(int limit) {
         return Math.min(Math.max(limit, 1), 200);
+    }
+
+    private String normalizeErrorScope(String scope) {
+        String normalizedScope = scope == null ? "all" : scope.trim().toLowerCase();
+        if (!"all".equals(normalizedScope) && !"today".equals(normalizedScope) && !"repeated".equals(normalizedScope)) {
+            throw new ApiException(400, "scope must be all, today or repeated");
+        }
+        return normalizedScope;
+    }
+
+    private void validateRemoveThreshold(int removeThreshold) {
+        if (removeThreshold < 0 || removeThreshold > 3) {
+            throw new ApiException(400, "removeThreshold must be between 0 and 3");
+        }
     }
 
     private void validateSubject(int subject) {
@@ -770,10 +973,14 @@ public class DrivingExamService {
     }
 
     private String toJson(List<Long> values) {
+        return toJsonValue(values);
+    }
+
+    private String toJsonValue(Object value) {
         try {
-            return objectMapper.writeValueAsString(values);
+            return objectMapper.writeValueAsString(value);
         } catch (JsonProcessingException ex) {
-            throw new ApiException(500, "Failed to serialize exam history");
+            throw new ApiException(500, "Failed to serialize json payload");
         }
     }
 
@@ -783,6 +990,28 @@ public class DrivingExamService {
         }
         try {
             return objectMapper.readValue(json, new TypeReference<List<Long>>() {});
+        } catch (JsonProcessingException ex) {
+            return List.of();
+        }
+    }
+
+    private List<String> parseStringList(String json) {
+        if (json == null || json.isBlank()) {
+            return List.of();
+        }
+        try {
+            return objectMapper.readValue(json, new TypeReference<List<String>>() {});
+        } catch (JsonProcessingException ex) {
+            return List.of();
+        }
+    }
+
+    private List<Boolean> parseBooleanList(String json) {
+        if (json == null || json.isBlank()) {
+            return List.of();
+        }
+        try {
+            return objectMapper.readValue(json, new TypeReference<List<Boolean>>() {});
         } catch (JsonProcessingException ex) {
             return List.of();
         }
@@ -798,6 +1027,18 @@ public class DrivingExamService {
     }
 
     private record PracticeRecordStats(int totalAnswered, int totalCorrect, int totalWrong) {
+    }
+
+    private record PracticeRecord(
+        long id,
+        long userId,
+        long questionId,
+        int subject,
+        String latestAnswer,
+        int latestResult,
+        LocalDateTime answeredAt,
+        LocalDateTime updatedAt
+    ) {
     }
 
     private record PracticeRecordUpsert(long questionId, int latestResult) {

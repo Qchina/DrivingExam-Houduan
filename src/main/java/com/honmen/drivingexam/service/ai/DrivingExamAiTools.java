@@ -59,7 +59,7 @@ public class DrivingExamAiTools {
         }
         try {
             int safeSubject = normalizeSubject(subject);
-            PageResult<ErrorQuestion> result = drivingExamService.listErrors(userId, safeSubject, 0, 1, 6);
+            PageResult<ErrorQuestion> result = drivingExamService.listErrors(userId, safeSubject, 0, "all", 1, 6);
             if (result.total() == 0 || result.list().isEmpty()) {
                 return subjectText(safeSubject) + "暂无未掌握错题。";
             }
