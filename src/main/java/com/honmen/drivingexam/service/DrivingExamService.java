@@ -15,7 +15,6 @@ import com.honmen.drivingexam.dto.PageResult;
 import com.honmen.drivingexam.exception.ApiException;
 import com.honmen.drivingexam.model.ExamHistory;
 import com.honmen.drivingexam.model.PracticeProgress;
-import com.honmen.drivingexam.model.PracticeRecord;
 import com.honmen.drivingexam.model.Question;
 import com.honmen.drivingexam.model.User;
 import org.springframework.dao.DuplicateKeyException;
