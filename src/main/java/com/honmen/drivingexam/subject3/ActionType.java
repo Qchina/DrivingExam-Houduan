@@ -1,0 +1,29 @@
+package com.honmen.drivingexam.subject3;
+
+public enum ActionType {
+    FASTEN_SEAT_BELT,
+    CHECK_MIRROR,
+    LOOK_BACK,
+    TURN_SIGNAL_LEFT,
+    TURN_SIGNAL_RIGHT,
+    TURN_SIGNAL_OFF,
+    BRAKE,
+    CLUTCH,
+    SHIFT_GEAR,
+    RELEASE_HANDBRAKE,
+    START_ENGINE,
+    HONK,
+    LOW_BEAM,
+    HIGH_BEAM,
+    ALTERNATE_HIGH_LOW_BEAM,
+    HAZARD_LIGHT,
+    FOG_LIGHT,
+    WIPER,
+    SLOW_DOWN,
+    STOP,
+    OBSERVE_LEFT_RIGHT,
+    KEEP_STRAIGHT,
+    CHANGE_LANE,
+    PULL_OVER,
+    U_TURN
+}
