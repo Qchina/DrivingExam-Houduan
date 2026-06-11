@@ -11,6 +11,8 @@ public record ExamHistory(
     int timeUsed,
     int isPassed,
     List<Long> wrongQuestionIds,
+    List<Long> questionIds,
+    List<String> selectedAnswers,
     LocalDateTime createdAt
 ) {
 }

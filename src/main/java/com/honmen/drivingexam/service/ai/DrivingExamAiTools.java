@@ -6,11 +6,16 @@ import com.honmen.drivingexam.dto.BusinessDtos.ErrorQuestion;
 import com.honmen.drivingexam.dto.BusinessDtos.FavoriteQuestion;
 import com.honmen.drivingexam.dto.PageResult;
 import com.honmen.drivingexam.exception.ApiException;
+import com.honmen.drivingexam.model.ExamHistory;
 import com.honmen.drivingexam.model.Question;
 import com.honmen.drivingexam.service.DrivingExamService;
 import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import org.springframework.stereotype.Component;
+
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 @Component
 public class DrivingExamAiTools {
@@ -109,6 +114,69 @@ public class DrivingExamAiTools {
         }
     }
 
+    @Tool("查询用户最近一次模拟考试报告，用于分析本次模考表现、错题原因和下一步复习计划。")
+    public String latestMockExamReport(
+        @P("当前登录用户ID") Long userId,
+        @P("科目编号，只支持1或4") Integer subject
+    ) {
+        if (userId == null || userId <= 0) {
+            return "用户未登录，无法查询最近模拟考试报告。";
+        }
+        try {
+            int safeSubject = normalizeSubject(subject);
+            List<ExamHistory> histories = drivingExamService.examHistory(userId, safeSubject);
+            if (histories.isEmpty()) {
+                return subjectText(safeSubject) + "暂无模拟考试记录。";
+            }
+
+            ExamHistory latest = histories.get(0);
+            int totalCount = latest.questionIds() == null || latest.questionIds().isEmpty()
+                ? (safeSubject == 1 ? 100 : 50)
+                : latest.questionIds().size();
+            int wrongCount = latest.wrongQuestionIds() == null ? 0 : latest.wrongQuestionIds().size();
+            int correctCount = Math.max(0, Math.round(latest.score() * totalCount / 100.0f));
+            String accuracy = String.format("%.1f%%", correctCount * 100.0 / totalCount);
+            Map<Long, String> selectedAnswerMap = selectedAnswerMap(latest);
+
+            StringBuilder builder = new StringBuilder();
+            builder.append(subjectText(safeSubject)).append("最近一次模拟考试：")
+                .append("分数 ").append(latest.score()).append(" 分")
+                .append("，正确率 ").append(accuracy)
+                .append("，答对 ").append(correctCount).append(" 题")
+                .append("，答错 ").append(wrongCount).append(" 题")
+                .append("，结果 ").append(latest.isPassed() == 1 ? "合格" : "未合格")
+                .append("，用时 ").append(formatDuration(latest.timeUsed())).append("。");
+
+            if (wrongCount == 0) {
+                builder.append("\n本次没有记录错题。");
+                return builder.toString();
+            }
+
+            List<Long> wrongIds = latest.wrongQuestionIds().stream().limit(6).toList();
+            String ids = wrongIds.stream().map(String::valueOf).collect(Collectors.joining(","));
+            Map<Long, Question> questions = drivingExamService.batchQuestions(ids)
+                .stream()
+                .collect(Collectors.toMap(Question::id, question -> question));
+
+            builder.append("\n本次错题样本：");
+            for (Long questionId : wrongIds) {
+                Question question = questions.get(questionId);
+                if (question == null) {
+                    continue;
+                }
+                builder.append("\n- 题目：").append(limit(question.title(), 90))
+                    .append("；题型：").append(questionTypeText(question.type()))
+                    .append("；你的选择：").append(answerWithContent(question, selectedAnswerMap.get(questionId)))
+                    .append("；正确答案：").append(question.answer())
+                    .append("；选项：").append(optionSummary(question))
+                    .append("；解析：").append(limit(question.description(), 100));
+            }
+            return builder.toString();
+        } catch (ApiException ex) {
+            return "模拟考试报告查询失败：" + ex.getMessage();
+        }
+    }
+
     private String formatSubjectOverview(SubjectOverview overview) {
         return "已答 " + overview.totalAnswered()
             + " 题，正确 " + overview.totalCorrect()
@@ -122,6 +190,118 @@ public class DrivingExamAiTools {
 
     private String subjectText(int subject) {
         return subject == 4 ? "科目四" : "科目一";
+    }
+
+    private String questionTypeText(String type) {
+        String normalized = type == null ? "" : type.toLowerCase();
+        if ("2".equals(normalized) || "judge".equals(normalized)) {
+            return "判断题";
+        }
+        if ("3".equals(normalized) || "multiple".equals(normalized)) {
+            return "多选题";
+        }
+        return "单选题";
+    }
+
+    private String optionSummary(Question question) {
+        if ("2".equals(question.type()) || "judge".equalsIgnoreCase(question.type())) {
+            return "A.正确；B.错误";
+        }
+        StringBuilder builder = new StringBuilder();
+        appendOption(builder, "A", question.optionA());
+        appendOption(builder, "B", question.optionB());
+        appendOption(builder, "C", question.optionC());
+        appendOption(builder, "D", question.optionD());
+        return builder.isEmpty() ? "无选项信息" : builder.toString();
+    }
+
+    private Map<Long, String> selectedAnswerMap(ExamHistory history) {
+        if (history.questionIds() == null || history.selectedAnswers() == null) {
+            return Map.of();
+        }
+        java.util.HashMap<Long, String> result = new java.util.HashMap<>();
+        int size = Math.min(history.questionIds().size(), history.selectedAnswers().size());
+        for (int index = 0; index < size; index++) {
+            result.put(history.questionIds().get(index), history.selectedAnswers().get(index));
+        }
+        return result;
+    }
+
+    private String answerWithContent(Question question, String answer) {
+        if (answer == null || answer.isBlank()) {
+            return "未作答";
+        }
+        String normalized = normalizeAnswer(answer);
+        if (normalized.isBlank()) {
+            return "未作答";
+        }
+        StringBuilder builder = new StringBuilder();
+        for (int index = 0; index < normalized.length(); index++) {
+            String key = String.valueOf(normalized.charAt(index));
+            String content = optionContent(question, key);
+            if (!builder.isEmpty()) {
+                builder.append("；");
+            }
+            builder.append(key);
+            if (content != null && !content.isBlank()) {
+                builder.append(".").append(limit(content, 45));
+            }
+        }
+        return builder.toString();
+    }
+
+    private String optionContent(Question question, String key) {
+        if (("2".equals(question.type()) || "judge".equalsIgnoreCase(question.type()))) {
+            if ("A".equals(key)) {
+                return "正确";
+            }
+            if ("B".equals(key)) {
+                return "错误";
+            }
+            return "";
+        }
+        return switch (key) {
+            case "A" -> question.optionA();
+            case "B" -> question.optionB();
+            case "C" -> question.optionC();
+            case "D" -> question.optionD();
+            default -> "";
+        };
+    }
+
+    private String normalizeAnswer(String answer) {
+        java.util.TreeSet<Character> answerSet = new java.util.TreeSet<>();
+        String upperAnswer = answer == null ? "" : answer.toUpperCase();
+        for (int index = 0; index < upperAnswer.length(); index++) {
+            char current = upperAnswer.charAt(index);
+            if (current >= 'A' && current <= 'D') {
+                answerSet.add(current);
+            }
+        }
+        StringBuilder builder = new StringBuilder();
+        for (Character item : answerSet) {
+            builder.append(item);
+        }
+        return builder.toString();
+    }
+
+    private void appendOption(StringBuilder builder, String key, String value) {
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        if (!builder.isEmpty()) {
+            builder.append("；");
+        }
+        builder.append(key).append(".").append(limit(value, 45));
+    }
+
+    private String formatDuration(int seconds) {
+        int minutes = Math.max(0, seconds) / 60;
+        int remainSeconds = Math.max(0, seconds) % 60;
+        if (minutes == 0) {
+            return remainSeconds + " 秒";
+        }
+        return minutes + " 分 " + remainSeconds + " 秒";
     }
 
     private String blankToDefault(String value, String defaultValue) {

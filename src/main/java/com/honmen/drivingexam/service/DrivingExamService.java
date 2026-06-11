@@ -72,8 +72,31 @@ public class DrivingExamService {
 
     public DrivingExamService(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
+        ensureExamHistoryColumns();
         ensureDefaultUser();
         importQuestionsIfEmpty();
+    }
+
+    private void ensureExamHistoryColumns() {
+        addColumnIfMissing("mock_exam_history", "question_ids", "JSON NULL");
+        addColumnIfMissing("mock_exam_history", "selected_answers", "JSON NULL");
+    }
+
+    private void addColumnIfMissing(String tableName, String columnName, String columnDefinition) {
+        try {
+            Long count = jdbc.queryForObject("""
+                SELECT COUNT(*)
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = ?
+                  AND COLUMN_NAME = ?
+                """, Long.class, tableName, columnName);
+            if (count == null || count == 0) {
+                jdbc.execute("ALTER TABLE " + tableName + " ADD COLUMN " + columnName + " " + columnDefinition);
+            }
+        } catch (Exception ignored) {
+            // The table may not exist yet in some local setups; normal startup/import flow will handle it.
+        }
     }
 
     public AuthResponse register(String username, String password) {
@@ -381,16 +404,30 @@ public class DrivingExamService {
     public ExamHistory submitExam(long userId, ExamSubmitRequest request) {
         validateSubject(request.subject());
         List<Long> wrongIds = request.wrongQuestionIds() == null ? List.of() : List.copyOf(request.wrongQuestionIds());
+        List<Long> questionIds = request.questionIds() == null || request.questionIds().isEmpty()
+            ? List.of()
+            : normalizeQuestionIds(request.questionIds(), request.subject());
+        List<String> selectedAnswers = questionIds.isEmpty()
+            ? List.of()
+            : normalizeSelectedAnswers(request.selectedAnswers(), questionIds.size());
+        Map<Long, String> answerByQuestionId = new java.util.HashMap<>();
+        for (int index = 0; index < questionIds.size(); index++) {
+            answerByQuestionId.put(questionIds.get(index), selectedAnswers.get(index));
+        }
+
         wrongIds.stream()
             .filter(this::questionExists)
-            .forEach(questionId -> recordError(userId, questionId, request.subject(), ""));
+            .forEach(questionId -> recordError(userId, questionId, request.subject(), answerByQuestionId.getOrDefault(questionId, "")));
         String wrongIdsJson = toJson(wrongIds);
+        String questionIdsJson = toJson(questionIds);
+        String selectedAnswersJson = toJsonValue(selectedAnswers);
 
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbc.update(connection -> {
             PreparedStatement statement = connection.prepareStatement("""
-                INSERT INTO mock_exam_history (user_id, subject, score, time_used, is_passed, wrong_question_ids)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO mock_exam_history
+                    (user_id, subject, score, time_used, is_passed, wrong_question_ids, question_ids, selected_answers)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, Statement.RETURN_GENERATED_KEYS);
             statement.setLong(1, userId);
             statement.setInt(2, request.subject());
@@ -398,6 +435,8 @@ public class DrivingExamService {
             statement.setInt(4, request.timeUsed());
             statement.setInt(5, request.isPassed());
             statement.setString(6, wrongIdsJson);
+            statement.setString(7, questionIdsJson);
+            statement.setString(8, selectedAnswersJson);
             return statement;
         }, keyHolder);
         deleteMockExamProgress(userId, request.subject());
@@ -779,6 +818,8 @@ public class DrivingExamService {
             rs.getInt("time_used"),
             rs.getInt("is_passed"),
             parseLongList(rs.getString("wrong_question_ids")),
+            parseLongList(rs.getString("question_ids")),
+            parseStringList(rs.getString("selected_answers")),
             toLocalDateTime(rs.getTimestamp("created_at"))
         );
     }

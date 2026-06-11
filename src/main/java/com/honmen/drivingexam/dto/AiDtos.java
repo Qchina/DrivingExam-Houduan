@@ -17,6 +17,7 @@ public final class AiDtos {
         Long userId,
         Integer subject,
         String scene,
+        String context,
         List<ChatMessage> history
     ) {
     }

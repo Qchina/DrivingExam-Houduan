@@ -34,7 +34,7 @@ public class AiChatService {
             return new AiChatResponse("你可以问我题目解析、错题复盘或复习计划。", model, "fallback", LocalDateTime.now());
         }
         if (apiKey == null || apiKey.isBlank()) {
-            return new AiChatResponse(fallbackReply(message, request.subject()), model, "fallback", LocalDateTime.now());
+            return new AiChatResponse(fallbackReply(message, request.subject(), request.scene()), model, "fallback", LocalDateTime.now());
         }
 
         String reply;
@@ -45,16 +45,22 @@ public class AiChatService {
                 contextBuilder.history(request)
             ).trim();
         } catch (Exception ex) {
-            reply = fallbackReply(message, request.subject());
+            reply = fallbackReply(message, request.subject(), request.scene());
         }
         if (reply.isBlank()) {
-            reply = fallbackReply(message, request.subject());
+            reply = fallbackReply(message, request.subject(), request.scene());
         }
 
         return new AiChatResponse(reply, model, "ai", LocalDateTime.now());
     }
 
-    private String fallbackReply(String message, Integer subject) {
+    private String fallbackReply(String message, Integer subject, String scene) {
+        if ("wrong_question_analysis".equals(scene)) {
+            return "结论：这道题要先看题干关键词，再对照正确答案判断规则。\n\n**错因分析**：通常是把相近概念混在一起，或只凭生活习惯选答案。\n\n**记忆方法**：把正确答案和题干关键词绑定记忆，遇到类似题先找“让行、减速、禁止、确认安全”等核心词。\n\n**下次判断步骤**：先读问法，再排除危险做法，最后选择最安全、最符合法规的一项。";
+        }
+        if ("mock_exam_report".equals(scene)) {
+            return "本次报告建议先看三点：分数是否达到 90 分、错题是否集中在同类知识点、是否有未答题。\n\n**复盘重点**：先清空本次错题，再把高频错因整理成规则。\n\n**下一步计划**：每天顺序练习一组题，错题本复盘 15 分钟，再做 1 套模拟卷，正确率稳定到 90% 以上再约考。";
+        }
         String subjectText = subject == null ? "当前科目" : "科目" + subject;
         if (message.contains("错题") || message.contains("老错") || message.contains("总错")) {
             return "可以按“原因分类”复盘错题：先看题目问的是让行、速度、灯光还是标志，再对照正确答案记规则。建议把同类错题连续重做 3 遍，直到能说出为什么错。";

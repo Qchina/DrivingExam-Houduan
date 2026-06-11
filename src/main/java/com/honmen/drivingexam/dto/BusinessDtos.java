@@ -23,7 +23,9 @@ public final class BusinessDtos {
         @NotNull @Min(0) Integer score,
         @NotNull @Min(0) Integer timeUsed,
         @NotNull Integer isPassed,
-        List<Long> wrongQuestionIds
+        List<Long> wrongQuestionIds,
+        List<Long> questionIds,
+        List<String> selectedAnswers
     ) {
     }
 
