@@ -15,6 +15,8 @@ import java.util.regex.Pattern;
 @Service
 public class Subject3TrainingService {
     private static final Pattern TEXT_SEPARATOR = Pattern.compile("[\\s,，。；;、：:（）()【】\\[\\]{}]+");
+    private static final Pattern ANSWER_STEP_SEPARATOR = Pattern.compile("[\\n\\r,，。；;、]+");
+
     private final Subject3RuleEngine ruleEngine;
     private final List<ExamProject> projects = Subject3ProjectConfig.defaultProjects();
 
@@ -79,34 +81,21 @@ public class Subject3TrainingService {
             .filter(step -> !matchedPositionByStepId.containsKey(step.id()))
             .toList();
 
-        List<String> orderErrors = new ArrayList<>();
-        int previousPosition = -1;
-        String previousTitle = null;
-        for (TextEvaluationResult.MatchedStep matchedStep : matchedSteps.stream().sorted(Comparator.comparingInt(TextEvaluationResult.MatchedStep::order)).toList()) {
-            int position = matchedPositionByStepId.getOrDefault(matchedStep.stepId(), -1);
-            if (position >= 0 && previousPosition > position) {
-                orderErrors.add("“" + matchedStep.title() + "”应在“" + previousTitle + "”之后作答");
-            }
-            previousPosition = Math.max(previousPosition, position);
-            previousTitle = matchedStep.title();
-        }
+        List<String> orderErrors = buildOrderErrors(matchedSteps, matchedPositionByStepId);
+        List<String> extraSteps = splitAnswerSteps(request.userAnswerText()).stream()
+            .filter(stepText -> applicableSteps.stream().noneMatch(step -> stepMatchesText(step, stepText)))
+            .distinct()
+            .toList();
 
         int missingDeduction = missingSteps.stream().mapToInt(StandardStep::score).sum();
         int orderDeduction = orderErrors.size() * 5;
-        int score = Math.max(100 - missingDeduction - orderDeduction, 0);
+        int extraDeduction = extraSteps.size() * 2;
+        int score = Math.max(100 - missingDeduction - orderDeduction - extraDeduction, 0);
         boolean failMissing = missingSteps.stream().anyMatch(StandardStep::failIfMissing);
         boolean passed = score >= 90 && !failMissing && orderErrors.isEmpty();
+        List<String> feedback = buildTextFeedback(passed, applicableSteps.size(), matchedSteps, missingSteps, orderErrors, extraSteps);
 
-        List<String> feedback = new ArrayList<>();
-        if (passed) {
-            feedback.add("文本答题通过，关键步骤完整且顺序正确。");
-        } else {
-            feedback.add("请补全缺失步骤，并按训练流程顺序作答。");
-        }
-        missingSteps.forEach(step -> feedback.add("缺少：" + step.title()));
-        orderErrors.forEach(error -> feedback.add("顺序问题：" + error));
-
-        return new TextEvaluationResult(score, passed, missingSteps, orderErrors, List.of(), matchedSteps, feedback);
+        return new TextEvaluationResult(score, passed, missingSteps, orderErrors, extraSteps, matchedSteps, feedback);
     }
 
     private ProjectConfig toProjectConfig(ExamProject project, VehicleType requestedVehicleType) {
@@ -175,6 +164,58 @@ public class Subject3TrainingService {
             Map.entry("crosswalk:yield", List.of("停车礼让行人", "礼让行人", "有行人停车", "停车让行"))
         );
         return configuredAliases.getOrDefault(projectId + ":" + step.id(), List.of(step.title()));
+    }
+
+    private List<String> buildOrderErrors(
+        List<TextEvaluationResult.MatchedStep> matchedSteps,
+        Map<String, Integer> matchedPositionByStepId
+    ) {
+        List<String> orderErrors = new ArrayList<>();
+        int previousPosition = -1;
+        String previousTitle = null;
+        for (TextEvaluationResult.MatchedStep matchedStep : matchedSteps.stream().sorted(Comparator.comparingInt(TextEvaluationResult.MatchedStep::order)).toList()) {
+            int position = matchedPositionByStepId.getOrDefault(matchedStep.stepId(), -1);
+            if (position >= 0 && previousPosition > position) {
+                orderErrors.add("“" + matchedStep.title() + "”应在“" + previousTitle + "”之后作答");
+            }
+            previousPosition = Math.max(previousPosition, position);
+            previousTitle = matchedStep.title();
+        }
+        return orderErrors;
+    }
+
+    private List<String> buildTextFeedback(
+        boolean passed,
+        int totalSteps,
+        List<TextEvaluationResult.MatchedStep> matchedSteps,
+        List<StandardStep> missingSteps,
+        List<String> orderErrors,
+        List<String> extraSteps
+    ) {
+        List<String> feedback = new ArrayList<>();
+        feedback.add("已匹配 " + matchedSteps.size() + "/" + totalSteps + " 个标准步骤。");
+        feedback.add(passed ? "文本答题通过，关键步骤完整且顺序正确。" : "请补齐缺失步骤，并按训练流程顺序作答。");
+        missingSteps.forEach(step -> feedback.add("缺少：" + step.title()));
+        orderErrors.forEach(error -> feedback.add("顺序问题：" + error));
+        extraSteps.forEach(step -> feedback.add("未识别：" + step));
+        return feedback;
+    }
+
+    private List<String> splitAnswerSteps(String answerText) {
+        if (answerText == null || answerText.isBlank()) {
+            return List.of();
+        }
+        return ANSWER_STEP_SEPARATOR.splitAsStream(answerText)
+            .map(String::trim)
+            .filter(value -> !value.isBlank())
+            .toList();
+    }
+
+    private boolean stepMatchesText(StandardStep step, String answerStepText) {
+        String normalizedStepText = normalizeText(answerStepText);
+        return step.aliases().stream()
+            .map(this::normalizeText)
+            .anyMatch(alias -> normalizedStepText.contains(alias) || alias.contains(normalizedStepText));
     }
 
     private int scoreFor(ExamProject project, ExamStep step) {
