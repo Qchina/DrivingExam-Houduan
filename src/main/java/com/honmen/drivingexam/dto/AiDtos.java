@@ -29,4 +29,30 @@ public final class AiDtos {
         LocalDateTime createdAt
     ) {
     }
+
+    public record AiDailyTaskRequest(
+        Long userId,
+        Integer subject,
+        String context,
+        Boolean forceRefresh,
+        Boolean cacheOnly
+    ) {
+    }
+
+    public record AiDailyTask(
+        String title,
+        String subtitle,
+        String actionType
+    ) {
+    }
+
+    public record AiDailyTaskResponse(
+        String summary,
+        List<AiDailyTask> tasks,
+        String model,
+        String mode,
+        Boolean cached,
+        LocalDateTime createdAt
+    ) {
+    }
 }

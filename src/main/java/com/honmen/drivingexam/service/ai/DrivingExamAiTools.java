@@ -16,6 +16,7 @@ import org.springframework.stereotype.Component;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import java.util.LinkedHashMap;
 
 @Component
 public class DrivingExamAiTools {
@@ -70,18 +71,47 @@ public class DrivingExamAiTools {
             }
             StringBuilder builder = new StringBuilder();
             builder.append(subjectText(safeSubject)).append("未掌握错题共 ").append(result.total()).append(" 道，最近样本：");
+            Map<String, Integer> categoryCount = new LinkedHashMap<>();
             for (ErrorQuestion item : result.list()) {
                 Question question = item.question();
+                String category = categoryOf(question);
+                categoryCount.merge(category, 1, Integer::sum);
                 builder.append("\n")
-                    .append("- 题目：").append(limit(question.title(), 90))
+                    .append("- 标签：").append(category)
+                    .append("；题目：").append(limit(question.title(), 90))
                     .append("；正确答案：").append(question.answer())
                     .append("；最近错选：").append(blankToDefault(item.latestWrongAnswer(), "未记录"))
                     .append("；错误次数：").append(item.errorCount())
                     .append("；解析：").append(limit(question.description(), 90));
             }
+            builder.append("\n错题标签分布：").append(formatCategoryCount(categoryCount));
             return builder.toString();
         } catch (ApiException ex) {
             return "错题查询失败：" + ex.getMessage();
+        }
+    }
+
+    @Tool("按知识点标签统计用户错题，用于判断主要薄弱点。")
+    public String wrongQuestionTags(
+        @P("当前登录用户ID") Long userId,
+        @P("科目编号，只支持1或4") Integer subject
+    ) {
+        if (userId == null || userId <= 0) {
+            return "用户未登录，无法统计错题标签。";
+        }
+        try {
+            int safeSubject = normalizeSubject(subject);
+            PageResult<ErrorQuestion> result = drivingExamService.listErrors(userId, safeSubject, 0, "all", 1, 50);
+            if (result.total() == 0 || result.list().isEmpty()) {
+                return subjectText(safeSubject) + "暂无错题标签数据。";
+            }
+            Map<String, Integer> categoryCount = new LinkedHashMap<>();
+            for (ErrorQuestion item : result.list()) {
+                categoryCount.merge(categoryOf(item.question()), 1, Integer::sum);
+            }
+            return subjectText(safeSubject) + "错题标签统计：" + formatCategoryCount(categoryCount);
+        } catch (ApiException ex) {
+            return "错题标签统计失败：" + ex.getMessage();
         }
     }
 
@@ -147,6 +177,8 @@ public class DrivingExamAiTools {
                 .append("，结果 ").append(latest.isPassed() == 1 ? "合格" : "未合格")
                 .append("，用时 ").append(formatDuration(latest.timeUsed())).append("。");
 
+            builder.append("\n最近模考趋势：").append(mockTrend(histories));
+
             if (wrongCount == 0) {
                 builder.append("\n本次没有记录错题。");
                 return builder.toString();
@@ -159,18 +191,23 @@ public class DrivingExamAiTools {
                 .collect(Collectors.toMap(Question::id, question -> question));
 
             builder.append("\n本次错题样本：");
+            Map<String, Integer> categoryCount = new LinkedHashMap<>();
             for (Long questionId : wrongIds) {
                 Question question = questions.get(questionId);
                 if (question == null) {
                     continue;
                 }
+                String category = categoryOf(question);
+                categoryCount.merge(category, 1, Integer::sum);
                 builder.append("\n- 题目：").append(limit(question.title(), 90))
+                    .append("；标签：").append(category)
                     .append("；题型：").append(questionTypeText(question.type()))
                     .append("；你的选择：").append(answerWithContent(question, selectedAnswerMap.get(questionId)))
                     .append("；正确答案：").append(question.answer())
                     .append("；选项：").append(optionSummary(question))
                     .append("；解析：").append(limit(question.description(), 100));
             }
+            builder.append("\n本次错题标签分布：").append(formatCategoryCount(categoryCount));
             return builder.toString();
         } catch (ApiException ex) {
             return "模拟考试报告查询失败：" + ex.getMessage();
@@ -190,6 +227,66 @@ public class DrivingExamAiTools {
 
     private String subjectText(int subject) {
         return subject == 4 ? "科目四" : "科目一";
+    }
+
+    private String mockTrend(List<ExamHistory> histories) {
+        if (histories == null || histories.isEmpty()) {
+            return "暂无历史模考数据。";
+        }
+        List<ExamHistory> latest = histories.stream().limit(3).toList();
+        String scores = latest.stream()
+            .map(item -> item.score() + "分")
+            .collect(Collectors.joining("、"));
+        if (latest.size() < 2) {
+            return "仅有 1 次记录：" + scores + "，建议再做 1-2 套确认稳定性。";
+        }
+        int newest = latest.get(0).score();
+        int previous = latest.get(1).score();
+        String direction = newest > previous ? "上升" : newest < previous ? "下降" : "持平";
+        long passedCount = latest.stream().filter(item -> item.isPassed() == 1).count();
+        return "近" + latest.size() + "次分数：" + scores + "，最近一次较上次" + direction + "，合格 " + passedCount + "/" + latest.size() + " 次。";
+    }
+
+    private String categoryOf(Question question) {
+        String text = ((question.title() == null ? "" : question.title()) + " " + (question.description() == null ? "" : question.description())).toLowerCase();
+        if (containsAny(text, "标志", "标线", "指示", "警告", "禁令", "路面", "车道")) {
+            return "标志标线";
+        }
+        if (containsAny(text, "让行", "先行", "行人", "非机动车", "交叉路口", "会车")) {
+            return "让行规则";
+        }
+        if (containsAny(text, "速度", "限速", "公里", "减速", "加速", "车速")) {
+            return "速度控制";
+        }
+        if (containsAny(text, "扣", "罚款", "违法", "处罚", "记分", "驾驶证")) {
+            return "违法处罚";
+        }
+        if (containsAny(text, "灯", "信号", "照明", "远光", "近光", "雾灯")) {
+            return "灯光信号";
+        }
+        if (containsAny(text, "事故", "伤员", "急救", "爆胎", "侧滑", "雨", "雪", "雾", "安全")) {
+            return "安全文明";
+        }
+        return "综合判断";
+    }
+
+    private boolean containsAny(String text, String... keywords) {
+        for (String keyword : keywords) {
+            if (text.contains(keyword)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String formatCategoryCount(Map<String, Integer> categoryCount) {
+        if (categoryCount == null || categoryCount.isEmpty()) {
+            return "暂无明显集中标签";
+        }
+        return categoryCount.entrySet().stream()
+            .sorted((left, right) -> Integer.compare(right.getValue(), left.getValue()))
+            .map(entry -> entry.getKey() + entry.getValue() + "题")
+            .collect(Collectors.joining("、"));
     }
 
     private String questionTypeText(String type) {

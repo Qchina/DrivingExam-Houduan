@@ -60,6 +60,9 @@ public class AiContextBuilder {
         if ("mock_exam_report".equals(scene)) {
             return "这是模拟考试报告分析。必须先调用 latestMockExamReport(userId, subject) 查询最近一次模考真实数据，再基于工具结果输出本次结果、具体错因、复盘重点、下一步计划。不要直接输出通用复习计划。";
         }
+        if ("study_dashboard".equals(scene)) {
+            return "这是首页 AI 今日教练。必须综合调用 learningProgress(userId)、recentWrongQuestions(userId, subject)、favoriteQuestions(userId, subject)、latestMockExamReport(userId, subject) 和 subjectStrategy(subject)，输出当前状态、主要问题、今日3个动作。没有数据时说明缺少哪项数据，并引导用户先练习或做模考。";
+        }
         return "普通驾考问答。根据用户问题解释题目、复盘错题或制定学习计划。";
     }
 
