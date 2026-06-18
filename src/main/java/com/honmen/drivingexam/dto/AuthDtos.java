@@ -15,6 +15,9 @@ public final class AuthDtos {
     public record UpdateUsernameRequest(@NotBlank String username, @NotBlank String password) {
     }
 
+    public record UpdatePasswordRequest(@NotBlank String password, @NotBlank String newPassword) {
+    }
+
     public record UserProfileResponse(long userId, String username, String nickname) {
     }
 }

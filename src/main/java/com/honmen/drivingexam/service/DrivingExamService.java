@@ -154,6 +154,25 @@ public class DrivingExamService {
         return new UserProfileResponse(updatedUser.id(), updatedUser.username(), updatedUser.nickname());
     }
 
+    public void updatePassword(String authorization, String password, String newPassword) {
+        long userId = requireAuthenticatedUserId(authorization);
+        User currentUser = getUserById(userId);
+
+        if (password == null || !currentUser.password().equals(password)) {
+            throw new ApiException(401, "Password invalid");
+        }
+
+        if (newPassword == null || newPassword.length() < 6) {
+            throw new ApiException(400, "Password must be at least 6 characters");
+        }
+
+        if (currentUser.password().equals(newPassword)) {
+            throw new ApiException(400, "New password must be different");
+        }
+
+        jdbc.update("UPDATE `user` SET password_hash = ? WHERE id = ?", newPassword, userId);
+    }
+
     private void validatePhoneUsername(String username) {
         if (username == null || !username.matches("^1[3-9]\\d{9}$")) {
             throw new ApiException(400, "手机号格式错误！");

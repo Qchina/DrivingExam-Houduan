@@ -3,6 +3,7 @@ package com.honmen.drivingexam.controller;
 import com.honmen.drivingexam.dto.ApiResponse;
 import com.honmen.drivingexam.dto.AuthDtos.AuthResponse;
 import com.honmen.drivingexam.dto.AuthDtos.LoginRequest;
+import com.honmen.drivingexam.dto.AuthDtos.UpdatePasswordRequest;
 import com.honmen.drivingexam.dto.AuthDtos.UpdateUsernameRequest;
 import com.honmen.drivingexam.dto.AuthDtos.UserProfileResponse;
 import com.honmen.drivingexam.service.DrivingExamService;
@@ -39,5 +40,14 @@ public class AuthController {
         @Valid @RequestBody UpdateUsernameRequest request
     ) {
         return ApiResponse.success(service.updateUsername(authorization, request.username(), request.password()));
+    }
+
+    @PutMapping("/password")
+    public ApiResponse<Void> updatePassword(
+        @RequestHeader(value = "Authorization", required = false) String authorization,
+        @Valid @RequestBody UpdatePasswordRequest request
+    ) {
+        service.updatePassword(authorization, request.password(), request.newPassword());
+        return ApiResponse.success(null);
     }
 }
