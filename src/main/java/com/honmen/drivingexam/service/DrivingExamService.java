@@ -5,6 +5,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.honmen.drivingexam.dto.AuthDtos.AuthResponse;
+import com.honmen.drivingexam.dto.AuthDtos.UserProfileResponse;
 import com.honmen.drivingexam.dto.BusinessDtos.ErrorQuestion;
 import com.honmen.drivingexam.dto.BusinessDtos.ExamSubmitRequest;
 import com.honmen.drivingexam.dto.BusinessDtos.FavoriteQuestion;
@@ -100,6 +101,7 @@ public class DrivingExamService {
     }
 
     public AuthResponse register(String username, String password) {
+        validatePhoneUsername(username);
         String nickname = "驾考新星";
         try {
             KeyHolder keyHolder = new GeneratedKeyHolder();
@@ -122,9 +124,40 @@ public class DrivingExamService {
     }
 
     public AuthResponse login(String username, String password) {
+        validatePhoneUsername(username);
         Optional<User> matched = findUserByUsername(username)
             .filter(user -> user.password().equals(password));
         return issueToken(matched.orElseThrow(() -> new ApiException(401, "账号或密码错误")));
+    }
+
+    public UserProfileResponse updateUsername(String authorization, String username, String password) {
+        long userId = requireAuthenticatedUserId(authorization);
+        String normalizedUsername = username == null ? "" : username.trim();
+        validatePhoneUsername(normalizedUsername);
+
+        User currentUser = getUserById(userId);
+        if (password == null || !currentUser.password().equals(password)) {
+            throw new ApiException(401, "Password invalid");
+        }
+
+        if (currentUser.username().equals(normalizedUsername)) {
+            return new UserProfileResponse(currentUser.id(), currentUser.username(), currentUser.nickname());
+        }
+
+        try {
+            jdbc.update("UPDATE `user` SET username = ? WHERE id = ?", normalizedUsername, userId);
+        } catch (DuplicateKeyException ex) {
+            throw new ApiException(400, "Username already exists");
+        }
+
+        User updatedUser = getUserById(userId);
+        return new UserProfileResponse(updatedUser.id(), updatedUser.username(), updatedUser.nickname());
+    }
+
+    private void validatePhoneUsername(String username) {
+        if (username == null || !username.matches("^1[3-9]\\d{9}$")) {
+            throw new ApiException(400, "手机号格式错误！");
+        }
     }
 
     public long requireUserId(String authorization) {
@@ -136,6 +169,18 @@ public class DrivingExamService {
             return getDefaultUser().id();
         }
         return Optional.ofNullable(tokenToUserId.get(token)).orElseGet(() -> getDefaultUser().id());
+    }
+
+    private long requireAuthenticatedUserId(String authorization) {
+        String token = Optional.ofNullable(authorization)
+            .filter(value -> value.startsWith("Bearer "))
+            .map(value -> value.substring("Bearer ".length()))
+            .orElse("");
+        if (token.isBlank() || "mock-token-abc".equals(token)) {
+            throw new ApiException(401, "UNAUTHORIZED");
+        }
+        return Optional.ofNullable(tokenToUserId.get(token))
+            .orElseThrow(() -> new ApiException(401, "UNAUTHORIZED"));
     }
 
     public PageResult<Question> listQuestions(int subject, String type, int page, int limit) {
@@ -575,6 +620,14 @@ public class DrivingExamService {
 
     private User getUserByUsername(String username) {
         return findUserByUsername(username).orElseThrow(() -> new ApiException(400, "User not found"));
+    }
+
+    private User getUserById(long userId) {
+        return findUserById(userId).orElseThrow(() -> new ApiException(400, "User not found"));
+    }
+
+    private Optional<User> findUserById(long userId) {
+        return queryOne("SELECT * FROM `user` WHERE id = ?", this::mapUser, userId);
     }
 
     private Optional<User> findUserByUsername(String username) {

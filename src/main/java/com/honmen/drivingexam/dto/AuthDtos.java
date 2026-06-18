@@ -11,4 +11,10 @@ public final class AuthDtos {
 
     public record AuthResponse(String token, long userId, String nickname) {
     }
+
+    public record UpdateUsernameRequest(@NotBlank String username, @NotBlank String password) {
+    }
+
+    public record UserProfileResponse(long userId, String username, String nickname) {
+    }
 }
